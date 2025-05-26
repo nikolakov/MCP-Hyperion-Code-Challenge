@@ -1,0 +1,14 @@
+# Dependencies directory
+node_modules
+
+# Compiled output directory
+build
+
+# Environment variables file containing API keys
+.env
+
+# VS Code editor settings
+.vscode
+
+# macOS system files
+.DS_Store
