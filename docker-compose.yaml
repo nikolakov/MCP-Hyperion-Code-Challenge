@@ -1,9 +1,10 @@
-version: "3.8"
 services:
   crypto-trends:
     build: .
     image: crypto-trends:latest
+    # still reads your .env (optional, since you baked it in at build time)
     env_file:
       - .env
-    stdin_open: true # keep STDIN open
-    tty: true # allocate a pseudo-TTY
+    ports:
+      - "3000:3000"
+    restart: unless-stopped

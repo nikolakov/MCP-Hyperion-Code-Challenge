@@ -1,4 +1,4 @@
-import { ADXResponse, BulkResponse, OHLCV } from "./types";
+import { ADXResponse, OHLCV } from "./types";
 
 export function formatMetaData(symbol: string, interval: string) {
   return [`Symbol: ${symbol}`, `Interval: ${interval}`, `---`].join("\n");

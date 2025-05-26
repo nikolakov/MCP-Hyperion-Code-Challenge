@@ -1,175 +1,115 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import Taapi from "taapi";
-import BinanceCLient from "binance-api-node";
-import dotenv from "dotenv";
-import path from "path";
-import {
-  attachMetaData,
-  formatADXData,
-  formatOHLCVData,
-  simpleTextResponse,
-} from "./helpers";
-import { ADXResponse, Interval, intervals } from "./types";
-import {
-  getAdxCache,
-  getAdxCacheKey,
-  getOhlcvCache,
-  getOhlcvCacheKey,
-  setAdxCache,
-  setOhlcvCache,
-} from "./cache";
-import { classifyTrendWithAI } from "./ai";
+import express from "express";
+import { randomUUID } from "node:crypto";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { createServer } from "./mcpServer";
 
-dotenv.config({ path: path.resolve(__dirname, "../.env") });
+const app = express();
+app.use(express.json());
 
-const taapi = new Taapi(process.env.TAAPI_API_KEY!);
-const client = BinanceCLient();
+// Map to store transports by session ID
+const transports = {
+  streamable: {} as Record<string, StreamableHTTPServerTransport>,
+  sse: {} as Record<string, SSEServerTransport>,
+};
 
-const server = new McpServer({
-  name: "crypto-trends",
-  version: "1.0.0",
-  capabilities: {
-    resources: {},
-    tools: {},
-  },
+// Handle POST requests for client-to-server communication
+app.post("/mcp", async (req, res) => {
+  // Check for existing session ID
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  let transport: StreamableHTTPServerTransport;
+
+  if (sessionId && transports.streamable[sessionId]) {
+    // Reuse existing transport
+    transport = transports.streamable[sessionId];
+  } else if (!sessionId && isInitializeRequest(req.body)) {
+    // New initialization request
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sessionId) => {
+        // Store the transport by session ID
+        transports.streamable[sessionId] = transport;
+      },
+    });
+
+    // Clean up transport when closed
+    transport.onclose = () => {
+      if (transport.sessionId) {
+        delete transports.streamable[transport.sessionId];
+      }
+    };
+
+    const server = createServer();
+
+    await server.connect(transport);
+  } else {
+    res.status(400).json({
+      jsonrpc: "2.0",
+      error: {
+        code: -32000,
+        message: "Bad Request: No valid session ID provided",
+      },
+      id: null,
+    });
+    return;
+  }
+
+  await transport.handleRequest(req, res, req.body);
 });
 
-async function getADX(symbol: string, interval: Interval, period: number) {
-  const key = getAdxCacheKey(symbol, interval, period);
-  const cached = getAdxCache(key);
-  if (cached) {
-    return cached;
+const handleSessionRequest = async (
+  req: express.Request,
+  res: express.Response
+) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  if (!sessionId || !transports.streamable[sessionId]) {
+    res.status(400).send("Invalid or missing session ID");
+    return;
   }
-  try {
-    const data = (await taapi.getIndicator("adx", symbol, interval, {
-      period,
-    })) as ADXResponse;
-    setAdxCache(key, data);
-    return data;
-  } catch (error) {
-    console.error("TAAPI request failed:", error);
-    return { error: (error as Error).message };
-  }
-}
 
-async function getOHLCV(symbol: string, interval: Interval, period: number) {
-  const key = getOhlcvCacheKey(symbol, interval, period);
-  const cached = getOhlcvCache(key);
-  if (cached) {
-    return cached;
-  }
-  try {
-    const ohlcv = (
-      await client.candles({
-        symbol: symbol,
-        interval: interval,
-        limit: period,
-      })
-    ).map((candle) => {
-      return {
-        open: Number(candle.open),
-        high: Number(candle.high),
-        low: Number(candle.low),
-        close: Number(candle.close),
-        volume: Number(candle.volume),
-        timestamp: candle.openTime,
-      };
-    });
-    setOhlcvCache(key, ohlcv);
-    return ohlcv;
-  } catch (error) {
-    console.error("OHLCV request failed:", error);
-    return { error: (error as Error).message };
-  }
-}
+  const transport = transports.streamable[sessionId];
+  await transport.handleRequest(req, res);
+};
 
-server.tool(
-  "get-ohlcv",
-  "Get OHLCV data for a given symbol (with / between the base and quote currency) for a given candle size and a given number of candles",
-  {
-    symbol: z.string(),
-    interval: z.enum(intervals),
-    period: z.number(),
-  },
-  async ({ symbol, interval, period }) => {
-    const ohlcv = await getOHLCV(symbol.replace("/", ""), interval, period);
+// Handle GET requests for server-to-client notifications via SSE
+app.get("/mcp", handleSessionRequest);
 
-    if ("error" in ohlcv) {
-      return simpleTextResponse("Failed to fetch ohlcv data: " + ohlcv.error);
-    }
+// Handle DELETE requests for session termination
+app.delete("/mcp", handleSessionRequest);
 
-    const response = attachMetaData(formatOHLCVData(ohlcv), symbol, interval);
+const server = createServer();
 
-    return simpleTextResponse(response);
-  }
-);
+// Legacy SSE endpoint for older clients
+app.get("/sse", async (req, res) => {
+  // Create SSE transport for legacy clients
+  const transport = new SSEServerTransport("/messages", res);
+  transports.sse[transport.sessionId] = transport;
 
-server.tool(
-  "get-adx",
-  "Get ADX data for a given symbol (with / between the base and quote currency) for a given candle size and a given number of candles",
-  {
-    symbol: z.string(),
-    interval: z.enum(intervals),
-    period: z.number(),
-  },
-  async ({ symbol, interval, period }) => {
-    const adx = await getADX(symbol, interval, period);
+  res.on("close", () => {
+    delete transports.sse[transport.sessionId];
+  });
 
-    if ("error" in adx) {
-      return simpleTextResponse("Failed to fetch adx data: " + adx.error);
-    }
-
-    const response = attachMetaData(
-      formatADXData(period, adx),
-      symbol,
-      interval
-    );
-
-    return simpleTextResponse(response);
-  }
-);
-
-server.tool(
-  "classify-trend-by-ai",
-  "Classify whether a crypto asset is trending up, trending down, or ranging on the 1h chart",
-  {
-    symbol: z.string(),
-    interval: z.enum(intervals),
-    period: z.number(),
-  },
-  async ({ symbol, interval, period }) => {
-    const ohlcv = await getOHLCV(symbol.replace("/", ""), interval, period);
-    if ("error" in ohlcv) {
-      return simpleTextResponse(`Failed to fetch ohlcv: ${ohlcv.error}`);
-    }
-
-    const adx = await getADX(symbol, interval, period);
-    if ("error" in adx) {
-      return simpleTextResponse(`Failed to fetch adx: ${adx.error}`);
-    }
-
-    const regime = await classifyTrendWithAI({
-      symbol,
-      interval,
-      formattedOhlcv: formatOHLCVData(ohlcv),
-      formattedAdx: formatADXData(period, adx),
-    });
-    // expected to resolve to one of: "trending up", "trending down", "ranging"
-
-    const text = `Regime: ${regime}`;
-    return simpleTextResponse(attachMetaData(text, symbol, interval));
-  }
-);
-
-async function main() {
-  const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Crypto Trends server is running on stdio");
+});
+
+// Legacy message endpoint for older clients
+app.post("/messages", async (req, res) => {
+  const sessionId = req.query.sessionId as string;
+  const transport = transports.sse[sessionId];
+  if (transport) {
+    await transport.handlePostMessage(req, res, req.body);
+  } else {
+    res.status(400).send("No transport found for sessionId");
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+
+function main() {
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
 }
 
-main().catch((error) => {
-  console.error("Unhandled error in main: ", error);
-  process.exit(1);
-});
+main();

@@ -22,13 +22,29 @@ Indicator data is fetched from TAAPI, as recommended.
 ### Caching:
 
 I added a simple caching policy so that the main LLM can get an answer from the dedicated LLM - 'trending up', 'trending down' or 'randing' and then fetch the data by itself to evaluate the correctness of the classification.
+With no caching the TAAPI's rate limit of 1 request per 15 seconds is hit.
+
 Of course, that makes no sense in production, but still shows MCP can be used for both fetching raw data and more complex tools like quering an LLM on it's own via Vercel's AI SDK.
 
 ## Getting started
 
 Create a .env file with `TAAPI_API_KEY` and `OPENAI_API_KEY`
 
-run `docker compose build` in the project directory
+### Run a dev server
+
+Run `npm run dev` to directly start a local dev server using ts-node
+
+### Build and run a local prod server
+
+Run `npm run build` to build a js prod build
+Run `npm start` to start the prod server from `build/index.js`
+
+### With docker container
+
+run `docker compose build` in the project directory to build the image
+run `docker compose up -d` to start a docker container
+
+All servers will run on port 3000 or PORT env variable if set
 
 Add a config for claude desktop in the appropriate directory based on the installation and OS:
 
@@ -38,18 +54,18 @@ Add a config for claude desktop in the appropriate directory based on the instal
 {
   "mcpServers": {
     "crypto-trends": {
-      "command": "docker",
-      "args": ["run", "--rm", "-i", "crypto-trends:latest"]
+      "command": "npx",
+      "args": ["mcp-remote", "http://localhost:3000/sse", "--allow-http"]
     }
   }
 }
 ```
 
-Restart Claude Desktop. Stdio transport is used for local environment, so Claude spins up it's own container with docker run. Persistent server with http transport is an option, but requires substantially more setup.
+Restart Claude Desktop. AFAIK Claude Desktop currently supports only Stdio transport, which is why an experimental adapter package called `mcp-remote` is used to set up a connection via http / deprecated sse transport.
 
 ## Linting
 
-Standard ESLint/Prettier setup. Run `npm run lint` for lint check of `src/` directory
+Standard ESLint/Prettier setup. Run `npm run lint` for lint check of `src/` directory. An unused export in mcpServer.ts is deliberately left unused.
 
 ## Example user message:
 
